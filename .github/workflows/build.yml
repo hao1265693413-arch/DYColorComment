@@ -1,0 +1,58 @@
+name: Build DYColorComment
+on:
+  push:
+    branches: ['build/dycolor-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-src: https://github.com/theos/theos
+      - name: Build dylib
+        run: |
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          make clean
+          make -j4 FINALPACKAGE=1
+      - name: Verify dylib
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess, shutil, os
+          cands = [p for p in pathlib.Path('.theos').rglob('DYColorComment.dylib')
+                   if p.is_file() and p.parent.name == 'obj']
+          assert len(cands) == 1, cands
+          d = cands[0]
+          print('dylib', d, d.stat().st_size)
+          for arch in ('arm64','arm64e'):
+              subprocess.run(['xcrun','lipo',str(d),'-verify_arch',arch], check=True)
+          info = subprocess.check_output(['xcrun','lipo','-info',str(d)], text=True)
+          print(info)
+          raw = d.read_bytes()
+          for need in ('dycolor.log', 'text_extra', 'setAttributedText'):
+              assert need.encode() in raw, 'missing literal ' + need
+          # ObjC 里的中文字面量是 UTF-16LE
+          for cn in ('\u5c0f\u7403\u5df2\u521b\u5efa',):  # 小球已创建
+              assert cn.encode('utf-16-le') in raw, 'missing cn literal'
+          undef = subprocess.check_output(['xcrun','nm','-arch','arm64','-u',str(d)], text=True)
+          assert 'substrate' not in undef.lower(), 'must not link Substrate'
+          subprocess.run(['codesign','-dv',str(d)], check=True)
+          out = pathlib.Path('out'); out.mkdir(exist_ok=True)
+          shutil.copy(d, out/'DYColorComment.dylib')
+          print('ok', (out/'DYColorComment.dylib').stat().st_size)
+          PY
+      - name: Zip
+        run: |
+          cd out && zip -r DYColorComment-dylib.zip DYColorComment.dylib && ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dycolorcomment-dylib
+          path: |
+            out/DYColorComment.dylib
+            out/DYColorComment-dylib.zip
+          if-no-files-found: error
